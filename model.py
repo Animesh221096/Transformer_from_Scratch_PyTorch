@@ -42,33 +42,89 @@ class PositionalEncoding(nn.Module):
         return self.dropout(x)
     
     
-    class LayerNormalization(nn.Module):
+class LayerNormalization(nn.Module):
+    
+    def __init__(self, eps: float = 10**-6) -> None:
+        super().__init__()
+        self.esp: float = eps
+        self.alpha = nn.Parameter(torch.ones(1)) # Multipled
+        self.bias = nn.Parameter(torch.zeros(1)) # Added
         
-        def __init__(self, eps: float = 10**-6) -> None:
-            super().__init__()
-            self.esp: float = eps
-            self.alpha = nn.Parameter(torch.ones(1)) # Multipled
-            self.bias = nn.Parameter(torch.zeros(1)) # Added
+    def forward(self, x: torch.Tensor):
+        mean = x.mean(dim= -1, keepdim=True)
+        std = x.std(dim= -1, keepdim=True)
+        return self.alpha * (x - mean) / (std + self.esp) + self.bias
+    
+    
+class FeedForwardBlock(nn.Module):
+    
+    def __init__(self, d_model: int, d_ff: int, dropout: float) -> None:
+        super().__init__()
+        self.linear_1 = nn.Linear(d_model, d_ff) # W1 and B1
+        self.dropout = nn.Dropout(dropout)
+        
+        self.linear_2 = nn.Linear(d_ff, d_model) # W2 and B2
+        
+    def forward(self, x):
+        # (Batch, Seq_Len, d_model) --> (Batch, Seq_Len, d_ff) --> (Batch, Seq_Len, d_model)
+        
+        return self.linear_2(self.dropout(torch.relu(self.linear_1(x))))
+    
+    
+    
+class MultiHeadAttentionBlock(nn.Module):
+    
+    def __init__(self, d_model: int, h: int, dropout: int):
+        super.__init__()
+        self.d_model: int = d_model
+        self.h: int = h
+        
+        assert d_model % h == 0, "d_model is not divisible by h"
+        
+        self.d_k: int = d_model // h
+        self.w_q = nn.Linear(d_model, d_model) # Wq
+        self.w_k = nn.Linear(d_model, d_model) # Wk
+        self.w_v = nn.Linear(d_model, d_model) # Wv
+        
+        self.w_o = nn.Linear(d_model, d_model) # Wo
+        self.dropout = nn.Dropout(dropout)
+        
+    @staticmethod    
+    def attention(query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, mask, dropout: nn.Dropout) -> tuple[torch.Tensor, torch.Tensor]:
+        d_k = query.shape[-1]
+        
+        # (Batch, h, Seq_Len, d_k) --> (Batch, h, Seq_Len, Seq_Len)
+        # (Batch, h, Seq_Len, d_k) @ (Batch, h, d_k, Seq_Len)
+        attention_scores = (query @ key.transpose(-2, -1)) / math.sqrt(d_k)
+        
+        if mask is not None:
+            attention_scores.masked_fill_(mask == 0, -1e9)
             
-        def forward(self, x: torch.Tensor):
-            mean = x.mean(dim= -1, keepdim=True)
-            std = x.std(dim= -1, keepdim=True)
-            return self.alpha * (x - mean) / (std + self.esp) + self.bias
+        attention_scores = attention_scores.softmax(dim= -1) # (Batch, h, Seq_Len, Seq_Len)
         
-        
-    class FeedForwardBlock(nn.Module):
-        
-        def __init__(self, d_model: int, d_ff: int, dropout: float) -> None:
-            super().__init__()
-            self.linear_1 = nn.Linear(d_model, d_ff) # W1 and B1
-            self.dropout = nn.Dropout(dropout)
+        if dropout is not None:
+            attention_scores = dropout(attention_scores)
             
-            self.linear_2 = nn.Linear(d_ff, d_model) # W2 and B2
-            
-        def forward(self, x):
-            # (Batch, Seq_Len, d_model) --> (Batch, Seq_Len, d_ff) --> (Batch, Seq_Len, d_model)
-            
-            return self.linear_2(self.dropout(torch.relu(self.linear_1(x))))
+        # (Batch, h, Seq_Len, Seq_Len) --> (Batch, h, Seq_Len, d_k)
+        # (Batch, h, Seq_Len, Seq_Len) @ (Batch, h, Seq_Len, d_k)
+        return (attention_scores @ value), attention_scores
         
+    def forward(self, q, k, v, mask):
+        query: torch.Tensor = self.w_q(q) # (Batch, Seq_Len, d_model) --> (Batch, Seq_Len, d_model)
+        key: torch.Tensor = self.w_k(k) # (Batch, Seq_Len, d_model) --> (Batch, Seq_Len, d_model)
+        value: torch.Tensor = self.w_v(v) # (Batch, Seq_Len, d_model) --> (Batch, Seq_Len, d_model)
+        
+        # (Batch, Seq_Len, d_model) --> (Batch, Seq_Len, h, d_k) --> (Batch, h, Seq_Len, d_k)
+        query = query.view(query.shape[0], query.shape[1], self.h, self.d_k).transpose(1, 2)
+        key = query.view(key.shape[0], key.shape[1], self.h, self.d_k).transpose(1, 2)
+        value = query.view(value.shape[0], value.shape[1], self.h, self.d_k).transpose(1, 2)
+        
+        x, self.attention_score = MultiHeadAttentionBlock.attention(query, key, value, mask, self.dropout)
+        
+        # (Batch, h, Seq_Len, d_k) --> (Batch, Seq_Len, h, d_k) --> (Batch, Seq_Len, d_model)
+        x = x.transpose(1, 2).contiguous().view(x.shape[0], -1, self.h * self.d_k)
+        
+        # (Batch, Seq_Len, d_model)
+        return self.w_o(x)
         
         
