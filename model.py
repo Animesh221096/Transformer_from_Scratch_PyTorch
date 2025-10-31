@@ -11,6 +11,8 @@ class InputEmbeddings(nn.Module):
         self.embedding = nn.Embedding(num_embeddings= vocab_size, embedding_dim= d_model)
         
     def forward(self, x):
+        # (batch, seq_len) --> (batch, seq_len, d_model)
+        # Multiply by sqrt(d_model) to scale the embeddings according to the paper
         return self.embedding(x) * math.sqrt(self.d_model)
     
     
@@ -30,15 +32,19 @@ class PositionalEncoding(nn.Module):
         
         div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
         
-        pe[:, ::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
+        # Apply sine to even indices
+        pe[:, 0::2] = torch.sin(position * div_term) # sin(position * (10000 ** (2i / d_model))
         
-        pe.unsqueeze(0) # (1, seq_len, d_model)
+        # Apply cosine to odd indices
+        pe[:, 1::2] = torch.cos(position * div_term) # cos(position * (10000 ** (2i / d_model))
         
+        # Add a batch dimension to the positional encoding
+        pe = pe.unsqueeze(0) # (1, seq_len, d_model)
+        # Register the positional encoding as a buffer
         self.register_buffer('pe', pe)
         
     def forward(self, x):
-        x = x + (self.pe[:, :x.shape(1), :]).requires_grad_(False)
+        x = x + (self.pe[:, :x.shape[1], :]).requires_grad_(False) # (Batch, Seq_Len, d_model)
         return self.dropout(x)
     
     
@@ -46,14 +52,14 @@ class LayerNormalization(nn.Module):
     
     def __init__(self, eps: float = 10**-6) -> None:
         super().__init__()
-        self.esp: float = eps
-        self.alpha = nn.Parameter(torch.ones(1)) # Multipled
-        self.bias = nn.Parameter(torch.zeros(1)) # Added
+        self.eps: float = eps
+        self.alpha = nn.Parameter(torch.ones(1)) # Multipled  # alpha is a learnable parameter
+        self.bias = nn.Parameter(torch.zeros(1)) # Added # bias is a learnable parameter
         
     def forward(self, x: torch.Tensor):
-        mean = x.mean(dim= -1, keepdim=True)
-        std = x.std(dim= -1, keepdim=True)
-        return self.alpha * (x - mean) / (std + self.esp) + self.bias
+        mean = x.mean(dim = -1, keepdim = True)
+        std = x.std(dim = -1, keepdim = True)
+        return self.alpha * (x - mean) / (std + self.eps) + self.bias
     
     
 class FeedForwardBlock(nn.Module):
@@ -73,14 +79,15 @@ class FeedForwardBlock(nn.Module):
     
 class MultiHeadAttentionBlock(nn.Module):
     
-    def __init__(self, d_model: int, h: int, dropout: int):
-        super.__init__()
-        self.d_model: int = d_model
-        self.h: int = h
-        
+    def __init__(self, d_model: int, h: int, dropout: float) -> None:
+        super().__init__()
+        self.d_model: int = d_model # Embedding vector size
+        self.h: int = h # Number of heads
+        # Make sure d_model is divisible by h
         assert d_model % h == 0, "d_model is not divisible by h"
         
-        self.d_k: int = d_model // h
+        self.d_k: int = d_model // h # Dimension of vector seen by each head
+        
         self.w_q = nn.Linear(d_model, d_model) # Wq
         self.w_k = nn.Linear(d_model, d_model) # Wk
         self.w_v = nn.Linear(d_model, d_model) # Wv
@@ -91,21 +98,23 @@ class MultiHeadAttentionBlock(nn.Module):
     @staticmethod    
     def attention(query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, mask, dropout: nn.Dropout) -> tuple[torch.Tensor, torch.Tensor]:
         d_k = query.shape[-1]
-        
+        # Just apply the formula from the paper
         # (Batch, h, Seq_Len, d_k) --> (Batch, h, Seq_Len, Seq_Len)
         # (Batch, h, Seq_Len, d_k) @ (Batch, h, d_k, Seq_Len)
         attention_scores = (query @ key.transpose(-2, -1)) / math.sqrt(d_k)
         
         if mask is not None:
+            # Write a very low value (indicating -inf) to the positions where mask == 0
             attention_scores.masked_fill_(mask == 0, -1e9)
             
-        attention_scores = attention_scores.softmax(dim= -1) # (Batch, h, Seq_Len, Seq_Len)
+        attention_scores = attention_scores.softmax(dim= -1) # (Batch, h, Seq_Len, Seq_Len) # Apply softmax
         
         if dropout is not None:
             attention_scores = dropout(attention_scores)
             
         # (Batch, h, Seq_Len, Seq_Len) --> (Batch, h, Seq_Len, d_k)
         # (Batch, h, Seq_Len, Seq_Len) @ (Batch, h, Seq_Len, d_k)
+        # return attention scores which can be used for visualization
         return (attention_scores @ value), attention_scores
         
     def forward(self, q, k, v, mask):
@@ -115,15 +124,18 @@ class MultiHeadAttentionBlock(nn.Module):
         
         # (Batch, Seq_Len, d_model) --> (Batch, Seq_Len, h, d_k) --> (Batch, h, Seq_Len, d_k)
         query = query.view(query.shape[0], query.shape[1], self.h, self.d_k).transpose(1, 2)
-        key = query.view(key.shape[0], key.shape[1], self.h, self.d_k).transpose(1, 2)
-        value = query.view(value.shape[0], value.shape[1], self.h, self.d_k).transpose(1, 2)
+        key = key.view(key.shape[0], key.shape[1], self.h, self.d_k).transpose(1, 2)
+        value = value.view(value.shape[0], value.shape[1], self.h, self.d_k).transpose(1, 2)
         
-        x, self.attention_score = MultiHeadAttentionBlock.attention(query, key, value, mask, self.dropout)
+        # Calculate attention
+        x, self.attention_scores = MultiHeadAttentionBlock.attention(query, key, value, mask, self.dropout)
         
+        # Combine all the heads together
         # (Batch, h, Seq_Len, d_k) --> (Batch, Seq_Len, h, d_k) --> (Batch, Seq_Len, d_model)
         x = x.transpose(1, 2).contiguous().view(x.shape[0], -1, self.h * self.d_k)
         
-        # (Batch, Seq_Len, d_model)
+        # Multiply by Wo
+        # (Batch, Seq_Len, d_model) --> (Batch, Seq_Len, d_model)
         return self.w_o(x)
         
         
@@ -146,8 +158,8 @@ class EncoderBlock(nn.Module):
         self.feed_forward_block = feed_forward_block
         self.residual_connections = nn.ModuleList([ResidualConnection(dropout) for _ in range(2)])
         
-    def forward(self, x, src_mark):
-        x = self.residual_connections[0](x, lambda x: self.self_attention_block(x, x, x, src_mark))
+    def forward(self, x, src_mask):
+        x = self.residual_connections[0](x, lambda x: self.self_attention_block(x, x, x, src_mask))
         x = self.residual_connections[1](x, self.feed_forward_block)
         return x
     
@@ -168,7 +180,7 @@ class Encoder(nn.Module):
 class DecoderBlock(nn.Module):
     
     def __init__(self, self_attention_block: MultiHeadAttentionBlock, cross_attention_block: MultiHeadAttentionBlock, 
-                 feed_forward_block: FeedForwardBlock, dropout: float):
+                 feed_forward_block: FeedForwardBlock, dropout: float) -> None:
         super().__init__()
         self.self_attention_block = self_attention_block
         self.cross_attention_block = cross_attention_block
@@ -203,15 +215,16 @@ class ProjectionLayer(nn.Module):
         super().__init__()
         self.proj = nn.Linear(d_model, vocab_size)
         
-    def forward(self, x):
+    def forward(self, x) -> None:
         # (Batch, Seq_Len, d_model) --> (Batch, Seq_Len, vocab_size)
+        
         return torch.log_softmax(self.proj(x), dim= -1)
     
     
 class Transformer(nn.Module):
 
     def __init__(self, encoder: Encoder, decoder: Decoder, 
-                 src_embed: InputEmbeddings,  tgt_embed: InputEmbeddings,
+                 src_embed: InputEmbeddings, tgt_embed: InputEmbeddings,
                  src_pos: PositionalEncoding, tgt_pos: PositionalEncoding, 
                  projection_layer: ProjectionLayer) -> None:
         super().__init__()
@@ -228,25 +241,28 @@ class Transformer(nn.Module):
 
 
     def encode(self, src, src_mask):
+        # (Batch, Seq_Len, d_model)
         src = self.src_embed(src)
         src = self.src_pos(src)
         return self.encoder(src, src_mask)
     
     
-    def decode(self, encoder_output, src_mask, tgt, tgt_mask):
+    def decode(self, encoder_output: torch.Tensor, src_mask: torch.Tensor, tgt: torch.Tensor, tgt_mask: torch.Tensor):
+        # (Batch, Seq_Len, d_model)
         tgt = self.tgt_embed(tgt)
         tgt = self.tgt_pos(tgt)
         return self.decoder(tgt, encoder_output, src_mask, tgt_mask)
     
     
     def project(self, x):
+        # (Batch, Seq_Len, vocab_size)
         return self.projection_layer(x)
     
     
-def build_tranformer(src_vocab_size: int, tgt_vocab_size: int, 
+def build_transformer(src_vocab_size: int, tgt_vocab_size: int, 
                      src_seq_len: int, tgt_seq_len: int, 
                      d_model: int = 512, N: int = 6, h: int = 8, 
-                     dropout: float = 0.1, d_ff = 2048):
+                     dropout: float = 0.1, d_ff: int = 2048) -> Transformer:
     # Create the embedding layers
     src_embed = InputEmbeddings(d_model, src_vocab_size)
     tgt_embed = InputEmbeddings(d_model, tgt_vocab_size)
