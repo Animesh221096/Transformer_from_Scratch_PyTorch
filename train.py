@@ -1,11 +1,12 @@
 from model import build_transformer
 from dataset import BilingualDataset, causal_mask
-from config import get_config, get_weights_file_path, latest_weights_file_path
+from config import get_config, get_weights_file_path
 
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader, random_split
 
+import warnings
 from tqdm import tqdm
 from pathlib import Path
 
@@ -41,7 +42,7 @@ def get_or_build_tokenizer(config, ds, lang):
 
 def get_ds(config):
     # It only has the train split, so we divide it overselves
-    ds_raw = load_dataset(f"{config['datasource']}", f"{config["lang_src"]-config["lang_tgt"]}", split="train")
+    ds_raw = load_dataset(f"{config['datasource']}", f"{config["lang_src"]}-{config["lang_tgt"]}", split="train")
     
     # Build tokenizers
     tokenizer_src = get_or_build_tokenizer(config, ds_raw, config['lang_src'])
@@ -66,8 +67,8 @@ def get_ds(config):
         max_len_src = max(max_len_src, len(src_ids))
         max_len_tgt = max(max_len_tgt, len(tgt_ids))
         
-        print(f"Max length of the source sentence {max_len_src}")
-        print(f"Max length of the target sentence {max_len_tgt}")
+    print(f"Max length of the source sentence {max_len_src}")
+    print(f"Max length of the target sentence {max_len_tgt}")
         
     train_dataloader = DataLoader(train_ds, batch_size=config["batch_size"], shuffle=True)
     val_dataloader = DataLoader(val_ds, batch_size=1, shuffle=True)
@@ -135,24 +136,23 @@ def train_model(config):
             # (B, seq_len, tgt_vocab_size) --> (B * seq_len, vocab_size)
             loss = loss_fn(proj_output.view(-1, tokenizer_tgt.get_vocab_size()), label.view(-1))
             
-            batch_iterator.set_postfix({f"loss": f"{loss.item():6.3f}"})
+            batch_iterator.set_postfix({"loss": f"{loss.item():6.3f}"})
             
-            # Log
-            
+            # Log the loss
             writer.add_scalar("train loss", loss.item(), global_step)
             
             writer.flush()
             
-            # Backpropogate
+            # Backpropagate the loss
             loss.backward()
             
-            # Update
+            # Update the weights
             optimizer.step()
             optimizer.zero_grad()
             
             global_step += 1
         
-        # Save
+        # Save the model at the end of every epoch
         model_filename = get_weights_file_path(config, f"{epoch:02d}")
         torch.save({
             "epoch": epoch,
@@ -161,3 +161,9 @@ def train_model(config):
             "global_step": global_step
             }, model_filename
         )
+        
+        
+if __name__ == "__main__":
+    # warnings.filterwarnings("ignore")
+    config = get_config()
+    train_model(config)
