@@ -1,3 +1,4 @@
+from model import build_transformer
 from dataset import BilingualDataset, causal_mask
 
 import torch
@@ -69,4 +70,10 @@ def get_ds(config):
     val_dataloader = DataLoader(val_ds, batch_size=1, shuffle=True)
         
     return train_dataloader, val_dataloader, tokenizer_src, tokenizer_tgt
-        
+    
+    
+def get_model(config, vocab_src_len, vocab_tgt_len):
+    model = build_transformer(vocab_src_len, vocab_tgt_len, config["seq_len"], config['seq_len'], d_model=config['d_model'])
+    return model
+    
+    
