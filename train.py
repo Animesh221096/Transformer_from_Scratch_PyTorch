@@ -86,6 +86,7 @@ def train_model(config):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device {device}")
     
+    # Make sure the weights folder exists
     Path(config["model_folder"]).mkdir(parents=True, exist_ok=True)
     
     train_dataloader, val_dataloader, tokenizer_src, tokenizer_tgt = get_ds(config)
