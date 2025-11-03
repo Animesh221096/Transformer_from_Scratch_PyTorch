@@ -19,6 +19,40 @@ from tokenizers.pre_tokenizers import Whitespace
 
 from torch.utils.tensorboard import SummaryWriter
 
+
+def greedy_decode(model, source, source_mask, tokenizer_src, tokenizer_tgt, max_len, device):
+    sos_idx = tokenizer_tgt.token_to_id("[SOS]")
+    eos_idx = tokenizer_tgt.token_to_id("[EOS]")
+    
+    
+    # Precompute the encoder output and reuse it for every step
+    encoder_output = model.encode(source, source_mask)
+    # Initialize the decoder input with the sos token
+    decoder_input = torch.empty(1, 1).fill_(sos_idx).type_as(source).to(device)
+    
+    while True:
+        if decoder_input.size(1) == max_len:
+            break
+        
+        # Build mask for target
+        decoder_mask = causal_mask(decoder_input.size(1)).type_as(source_mask).to(device)
+        
+        # Calculate output
+        out = model.decode(encoder_output, source_mask, decoder_input, decoder_mask)
+        
+        # Get next token
+        prob = model.project(out[:, -1])
+        _, next_word = torch.max(prob, dim=1)
+        decoder_input = torch.cat(
+            [decoder_input, torch.empty(1, 1).type_as(source).fill_(next_word.item()).to(device)], dim=1
+            )
+
+        if next_word == eos_idx:
+            break
+        
+    return decoder_input.squeeze(0)
+
+
 def run_validation(model, validation_ds, tokenizer_src, tokenizer_tgt, max_len, device, print_msg, global_state, writer, num_examples=2):
     model.eval()
     count = 0
@@ -32,10 +66,11 @@ def run_validation(model, validation_ds, tokenizer_src, tokenizer_tgt, max_len, 
     with torch.no_grad():
         for batch in validation_ds:
             count += 1
-            encoder_inputs = batch["encoder_input"].to(device)
-            encoder_mask = batch["encoder_mask"].to(device)
-            
-            assert encoder_inputs.size(0) == 1, "Batch Size must be 1 for validation"
+            encoder_input = batch["encoder_input"].to(device) # (b, seq_len)
+            encoder_mask = batch["encoder_mask"].to(device) # (b, 1, 1, seq_len)
+
+            # check that the batch size is 1
+            assert encoder_input.size(0) == 1, "Batch size must be 1 for validation"
             
              
     
@@ -186,6 +221,6 @@ def train_model(config):
         
         
 if __name__ == "__main__":
-    # warnings.filterwarnings("ignore")
+    warnings.filterwarnings("ignore")
     config = get_config()
     train_model(config)
